@@ -39,5 +39,5 @@ The script will configure the following:
 
 Run the script with the following command in a PowerShell (*opened **as Administrator** in the directory where the script is located*):
 ```powershell
-powershell -ExecutionPolicy Bypass -File "./Win11_Sandbox_startup.ps1"
+powershell -ExecutionPolicy Bypass -File "./win11_sandbox_startup.ps1"
 ```
