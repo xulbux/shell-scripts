@@ -5,7 +5,7 @@ param(
     [switch]$debugSaveFiles,
     [switch]$noInstall,
     [switch]$noDownload,
-    [switch]$removeMsStoreAsSource = $false
+    [switch]$removeMsStoreAsSource
 )
 
 # CHECK THAT WE'RE RUNNING IN THE WINDOWS SANDBOX - THIS SCRIPT IS INTENDED TO BE RUN FROM WITHIN THE WINDOWS SANDBOX
@@ -26,6 +26,21 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 }
 
 
+############################################################ UTILITIES ############################################################
+
+# SETUP RESULT TRACKING FOR THE FINAL SUMMARY
+$script:setupResults = [System.Collections.ArrayList]::new()
+function Add-SetupResult {
+    param(
+        [string]$Step,
+        [ValidateSet("OK","WARN","FAIL")]
+        [string]$Status,
+        [string]$Message = ""
+    )
+    $null = $script:setupResults.Add(@{ Step = $Step; Status = $Status; Message = $Message })
+}
+
+
 ############################################################ GENERAL TWEAKS ############################################################
 
 Write-Host "`n`n============================================================" -ForegroundColor Blue
@@ -35,24 +50,31 @@ Write-Host "============================================================" -Foreg
 # FIX FOR SLOW MSI PACKAGE INSTALL - SEE: https://github.com/microsoft/Windows-Sandbox/issues/68#issuecomment-2754867968
 Write-Host "`nApplying MSI package install performance fix..." -ForegroundColor Cyan
 reg add "HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy" /v "VerifiedAndReputablePolicyState" /t REG_DWORD /d 0 /f | Out-Null
-CiTool.exe --refresh --json | Out-Null  # REFRESHES POLICY - USE JSON OUTPUT PARAM OR ELSE IT WILL PROMPT FOR CONFIRMATION, EVEN WITH OUT-NULL
+if (Get-Command CiTool.exe -ErrorAction SilentlyContinue) {
+    CiTool.exe --refresh --json | Out-Null  # REFRESHES POLICY - USE JSON OUTPUT PARAM OR ELSE IT WILL PROMPT FOR CONFIRMATION, EVEN WITH OUT-NULL
+}
 Write-Host "  -> MSI performance fix applied." -ForegroundColor Green
+Add-SetupResult "MSI performance fix" "OK"
 
 # CHANGE EXECUTION POLICY FOR POWERSHELL TO ALLOW RUNNING SCRIPTS
 Write-Host "`nSetting PowerShell execution policy..." -ForegroundColor Cyan
 try { 
     Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope LocalMachine -ErrorAction Stop | Out-Null
     Write-Host "  -> Execution policy set to Unrestricted." -ForegroundColor Green
+    Add-SetupResult "Execution policy" "OK"
 } catch {
     Write-Host "  -> [WARNING] Could not set execution policy. $($_.Exception.Message)" -ForegroundColor Yellow
+    Add-SetupResult "Execution policy" "WARN" $_.Exception.Message
 }
 
 # DETECT SYSTEM ARCHITECTURE ONCE FOR THE ENTIRE SCRIPT
-$systemArch = switch ($env:PROCESSOR_ARCHITECTURE) {
+# NOTE: WHEN RUNNING AS A 32-BIT PROCESS ON A 64-BIT OS (e.g. 'powershell.exe' INSTEAD OF 'pwsh'),
+# $env:PROCESSOR_ARCHITECTURE REPORTS 'x86'. THE REAL OS ARCHITECTURE IS IN $env:PROCESSOR_ARCHITEW6432.
+$realArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+$systemArch = switch ($realArch) {
     "AMD64"   { "x64" }
     "ARM64"   { "arm64" }
     "x86"     { "x86" }
-    "*ARM*"   { "arm" }
     default   { "x64" }
 }
 Write-Host "`nDetected system architecture: $systemArch" -ForegroundColor Green
@@ -90,10 +112,11 @@ $SPI_SETDESKWALLPAPER = 0x0014
 $UPDATE_INI_FILE = 0x01
 $SEND_CHANGE = 0x02
 
-[Wallpaper]::SystemParametersInfo($SPI_SETDESKWALLPAPER, 0, $wallpaperPath, ($UPDATE_INI_FILE -bor $SEND_CHANGE))
+$null = [Wallpaper]::SystemParametersInfo($SPI_SETDESKWALLPAPER, 0, $wallpaperPath, ($UPDATE_INI_FILE -bor $SEND_CHANGE))
 
 Write-Host "  -> Dark theme applied successfully!" -ForegroundColor Green
 
+Add-SetupResult "Dark theme" "OK"
 Write-Host "`nDark theme configuration completed successfully!" -ForegroundColor Blue
 
 
@@ -136,7 +159,7 @@ if ($null -ne $cmdPath) {
 Write-Host "`nAdding 'New File' context menu options..." -ForegroundColor Cyan
 reg add "HKEY_CLASSES_ROOT\txtfile" /ve /d "Text Document" /f | Out-Null
 reg add "HKEY_CLASSES_ROOT\.txt\ShellNew" /f | Out-Null
-reg --% add "HKEY_CLASSES_ROOT\.txt\ShellNew" /v "NullFile" /t REG_SZ /d "" /f
+New-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\.txt\ShellNew" -Name "NullFile" -Value "" -PropertyType String -Force | Out-Null
 reg add "HKEY_CLASSES_ROOT\.txt\ShellNew" /v "ItemName" /t REG_SZ /d "New Text Document" /f | Out-Null
 Write-Host "  -> Added 'New Text Document' to context menu." -ForegroundColor Green
 
@@ -145,10 +168,11 @@ reg add "HKEY_CLASSES_ROOT\ps1file" /ve /d "PowerShell Script" /f | Out-Null
 reg add "HKEY_CLASSES_ROOT\ps1file\DefaultIcon" /ve /d "%SystemRoot%\System32\imageres.dll,-5372" /f | Out-Null
 reg add "HKEY_CLASSES_ROOT\.ps1\ShellNew" /ve /d "ps1file" /f | Out-Null
 reg add "HKEY_CLASSES_ROOT\.ps1\ShellNew" /f | Out-Null
-reg --% add "HKEY_CLASSES_ROOT\.ps1\ShellNew" /v "NullFile" /t REG_SZ /d "" /f
+New-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\.ps1\ShellNew" -Name "NullFile" -Value "" -PropertyType String -Force | Out-Null
 reg add "HKEY_CLASSES_ROOT\.ps1\ShellNew" /v "ItemName" /t REG_SZ /d "script" /f | Out-Null
 Write-Host "  -> Added 'New PowerShell Script' to context menu." -ForegroundColor Green
 
+Add-SetupResult "Explorer configuration" "OK"
 Write-Host "`nExplorer configuration completed successfully!" -ForegroundColor Blue
 
 
@@ -314,7 +338,7 @@ try {
     Write-Host "`n[1] Getting authentication cookie..." -ForegroundColor Magenta
     $cookieRequestPayload = $cookieXmlTemplate
     if ($debugSaveFiles) { $cookieRequestPayload | Set-Content -Path (Join-Path $LogDirectory "01_Step1_Request.xml") }
-    
+
     $cookieResponse = Invoke-WebRequest -Uri $baseUri -Method Post -Body $cookieRequestPayload -Headers $headers -UseBasicParsing
     if ($debugSaveFiles) { $cookieResponse.Content | Set-Content -Path (Join-Path $LogDirectory "01_Step1_Response.xml"); Write-Host "  -> Saved request and response logs for [1]." -ForegroundColor Gray }
 
@@ -335,9 +359,9 @@ try {
     $decodedContent = [System.Web.HttpUtility]::HtmlDecode($fileListResponse.Content)
     $fileListResponseXml = [xml]$decodedContent
     Write-Host "  -> Successfully received and decoded [2] response." -ForegroundColor Green
-    
+
     $fileIdentityMap = @{}
-    
+
     # GET THE TWO MAIN LISTS OF UPDATES FROM THE NOW CORRECTLY-DECODED RESPONSE
     $newUpdates = $fileListResponseXml.Envelope.Body.SyncUpdatesResponse.SyncUpdatesResult.NewUpdates.UpdateInfo
     $allExtendedUpdates = $fileListResponseXml.Envelope.Body.SyncUpdatesResponse.SyncUpdatesResult.ExtendedUpdateInfo.Updates.Update
@@ -353,15 +377,15 @@ try {
     # NOW, PROCESS EACH DOWNLOADABLE UPDATE
     foreach ($update in $downloadableUpdates) {
         $lookupId = $update.ID
-        
+
         # FIND THE MATCHING ENTRY IN THE 'ExtendedUpdateInfo' LIST USING THE SAME NUMERIC ID
         $extendedInfo = $allExtendedUpdates | Where-Object { $_.ID -eq $lookupId } | Select-Object -First 1
-        
+
         if (-not $extendedInfo) {
             Write-Host "     [WARNING] Could not find matching ExtendedInfo for downloadable update ID $lookupId. Skipping." -ForegroundColor Yellow
             continue
         }
-        
+
         # FROM THE EXTENDED INFO, GET THE ACTUAL PACKAGE FILE AND IGNORE THE METADATA '.cab' FILES
         $fileNode = $extendedInfo.Xml.Files.File | Where-Object { $_.FileName -and $_.FileName -notlike "Abm_*" } | Select-Object -First 1
 
@@ -379,7 +403,7 @@ try {
         # DEFINE THE REGEX BASED ON THE OFFICIAL PACKAGE IDENTITY STRUCTURE
         # <Name>_<Version>_<Architecture>_<ResourceId>_<PublisherId>
         $regex = "^(?<Name>.+?)_(?<Version>\d+\.\d+\.\d+\.\d+)_(?<Architecture>[a-zA-Z0-9]+)_(?<ResourceId>.*?)_(?<PublisherId>[a-hjkmnp-tv-z0-9]{13})$"
-        
+
         $packageInfo = [PSCustomObject]@{
             FullName       = $fullIdentifier
             FileName       = $fileName
@@ -415,11 +439,10 @@ try {
 
         ######################### FILTER THE PACKAGES #########################
 
-        # [1] ISOLATE THE 'Microsoft.WindowsStore' PACKAGES AND FIND THE LATEST VERSION
-        $latestStorePackage = $fileIdentityMap.Values |
+        # [1] GET ALL 'Microsoft.WindowsStore' VERSIONS SORTED NEWEST FIRST (FOR FALLBACK IF LATEST HAS NO DOWNLOAD URL)
+        $allStorePackages = @($fileIdentityMap.Values |
             Where-Object { $_.PackageName -eq 'Microsoft.WindowsStore' } |
-            Sort-Object { [version]$_.Version } -Descending |
-            Select-Object -First 1
+            Sort-Object { [version]$_.Version } -Descending)
 
         # [2] GET ALL OTHER DEPENDENCIES THAT MATCH THE SYSTEM ARCHITECTURE (OR ARE NEUTRAL)
         $filteredDependencies = $fileIdentityMap.Values |
@@ -428,25 +451,28 @@ try {
                 ( ($_.Architecture -eq $systemArch) -or ($_.Architecture -eq 'neutral') )
             }
 
-        # [3] COMBINE THE LISTS FOR THE FINAL DOWNLOAD QUEUE
+        # [3] COMBINE THE LISTS FOR THE FINAL DOWNLOAD QUEUE (STORE VERSIONS FIRST, THEN DEPENDENCIES)
         $packagesToDownload = @()
-        if ($latestStorePackage) {
-            $packagesToDownload += $latestStorePackage
-            Write-Host "  -> Found latest Store package: $($latestStorePackage.FullName)" -ForegroundColor Green
+        if ($allStorePackages.Count -gt 0) {
+            $packagesToDownload += $allStorePackages
+            Write-Host "  -> Found $($allStorePackages.Count) Store package version(s), latest: $($allStorePackages[0].FullName)" -ForegroundColor Green
         } else {
             Write-Host "  -> [WARNING] Could not find any Microsoft.WindowsStore package." -ForegroundColor Yellow
         }
 
         $packagesToDownload += $filteredDependencies
         Write-Host "  -> Found $($filteredDependencies.Count) dependencies for '$systemArch' architecture." -ForegroundColor Gray
-        Write-Host "  -> Total files to download: $($packagesToDownload.Count)" -ForegroundColor Green
         Write-Host ""
 
 
         ######################### LOOP THROUGH THE FILTERED LIST, GET URLS, AND DOWNLOAD #########################
         Write-Host "[4] Fetching URLs and downloading files..." -ForegroundColor Magenta
 
+        $storePackageDownloaded = $false
         foreach ($package in $packagesToDownload) {
+            # SKIP OLDER STORE VERSIONS ONCE ONE HAS BEEN SUCCESSFULLY DOWNLOADED
+            if ($package.PackageName -eq 'Microsoft.WindowsStore' -and $storePackageDownloaded) { continue }
+
             Write-Host "  -> Processing: $($package.FullName)" -ForegroundColor Gray
 
             # GET THE DOWNLOAD URL FOR THIS SPECIFIC PACKAGE
@@ -458,8 +484,17 @@ try {
             $baseFileName = [System.IO.Path]::GetFileNameWithoutExtension($package.FileName)
             $downloadUrl = ($fileLocations | Where-Object { $_.Url -like "*$baseFileName*" }).Url
 
+            # FALLBACK: IF FILENAME MATCHING FAILS (COMMON FOR BUNDLE PACKAGES), TAKE THE FIRST NON-CAB URL
+            if (-not $downloadUrl -and $fileLocations) {
+                $downloadUrl = ($fileLocations | Where-Object { $_.Url -notlike "*.cab*" } | Select-Object -First 1).Url
+            }
+
             if (-not $downloadUrl) {
-                Write-Host "     [WARNING] Could not retrieve download URL. Skipping." -ForegroundColor Yellow
+                if ($package.PackageName -eq 'Microsoft.WindowsStore') {
+                    Write-Host "     [WARNING] No download URL for this Store version, trying next..." -ForegroundColor Yellow
+                } else {
+                    Write-Host "     [WARNING] Could not retrieve download URL. Skipping." -ForegroundColor Yellow
+                }
                 continue
             }
             if ($noDownload) {
@@ -475,16 +510,19 @@ try {
             try {
                 Invoke-WebRequest -Uri $downloadUrl -OutFile $filePath -UseBasicParsing
                 Write-Host "     Download complete." -ForegroundColor Green
+                if ($package.PackageName -eq 'Microsoft.WindowsStore') { $storePackageDownloaded = $true }
             } catch {
-                Write-Host "     [ERROR] Failed to download. $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "     [ERROR] Failed to download: $($_.Exception.Message)" -ForegroundColor Red
             }
         }
 
         Write-Host "`nFinished downloading packages to: $workingDir" -ForegroundColor Green
+        Add-SetupResult "MS Store download" "OK" "$($packagesToDownload.Count) packages"
 
     } catch {
         Write-Host "[ERROR] An error occurred during the filtering or downloading phase:" -ForegroundColor Red
         Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
+        Add-SetupResult "MS Store download" "FAIL" $_.Exception.Message
     }
 
     if ($noDownload) {
@@ -495,7 +533,7 @@ try {
         Write-Host "`nSkipping installation step (noInstall switch set)." -ForegroundColor Yellow
         return
     }
-    
+
     ######################### [5] INSTALL DOWNLOADED PACKAGES #########################
     Write-Host "`n[5] Installing packages..." -ForegroundColor Magenta
 
@@ -527,10 +565,10 @@ try {
             foreach ($package in $packagesInGroup) {
                 Write-Host "     Installing $($package.Name)" -ForegroundColor Gray
                 try {
-                    Add-AppxPackage -Path $package.FullName
+                    Add-AppxPackage -Path $package.FullName -ErrorAction Stop
                     Write-Host "     Success." -ForegroundColor Green
                 } catch {
-                    Write-Host "     [ERROR] Failed to install. $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Host "     [ERROR] Failed to install: $($_.Exception.Message)" -ForegroundColor Red
                 }
             }
         }
@@ -540,13 +578,16 @@ try {
             Write-Host "  -> Installing the main application..." -ForegroundColor Cyan
             Write-Host "     Installing $($storePackageFile.Name)" -ForegroundColor Gray
             try {
-                Add-AppxPackage -Path $storePackageFile.FullName
+                Add-AppxPackage -Path $storePackageFile.FullName -ErrorAction Stop
                 Write-Host "     Success: Microsoft Store has been installed/updated." -ForegroundColor Green
+                Add-SetupResult "MS Store install" "OK"
             } catch {
-                Write-Host "     [ERROR] Failed to install. $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "     [ERROR] Failed to install: $($_.Exception.Message)" -ForegroundColor Red
+                Add-SetupResult "MS Store install" "FAIL" $_.Exception.Message
             }
         } else {
             Write-Host "  -> Microsoft Store package was not found in the download folder." -ForegroundColor Yellow
+            Add-SetupResult "MS Store install" "FAIL" "Package not found in download folder"
         }
 
         Write-Host "`nInstallation process finished." -ForegroundColor Green
@@ -554,7 +595,7 @@ try {
     } catch {
         Write-Host "[ERROR] A critical error occurred during the installation phase: $($_.Exception.Message)" -ForegroundColor Red
     }
-    
+
     ######################### SET REGION TO US SO THE STORE WILL WORK - DEFAULT 'World' REGION DOES NOT WORK #########################
     Write-Host "`n  -> Configuring registry settings for Microsoft Store..." -ForegroundColor Cyan
     try {
@@ -570,9 +611,11 @@ try {
         # SET THE 'Name' VALUE
         Set-ItemProperty -Path $geoKeyPath -Name "Name" -Value "US"
         Write-Host "     Registry configuration complete." -ForegroundColor Green
+        Add-SetupResult "MS Store registry" "OK"
     }
     catch {
-        Write-Host "     [ERROR] Failed to configure registry settings. $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "     [ERROR] Failed to configure registry settings: $($_.Exception.Message)" -ForegroundColor Red
+        Add-SetupResult "MS Store registry" "FAIL" $_.Exception.Message
     }
 
     Write-Host "`nMicrosoft Store installation completed successfully!" -ForegroundColor Blue
@@ -584,7 +627,7 @@ try {
         $statusDescription = $_.Exception.Response.StatusDescription
         Write-Host "  Status Code: $statusCode" -ForegroundColor Yellow
         Write-Host "  Status Description: $statusDescription" -ForegroundColor Yellow
-        
+
         if ($debugSaveFiles) {
             $errorLogPath = Join-Path $LogDirectory "ERROR_Response.txt"
             try {
@@ -599,6 +642,7 @@ try {
     } else {
         Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
     }
+    Add-SetupResult "MS Store" "FAIL" $_.Exception.Message
 }
 
 
@@ -698,8 +742,14 @@ if (-not $msixUrl) {
 }
 
 $msixPath = Join-Path $downloadPath $msixName
-Invoke-WebRequest -Uri $msixUrl -OutFile $msixPath
-Write-Host "  -> Downloaded $msixName successfully." -ForegroundColor Green
+try {
+    Invoke-WebRequest -Uri $msixUrl -OutFile $msixPath -UseBasicParsing
+    Write-Host "  -> Downloaded $msixName successfully." -ForegroundColor Green
+    Add-SetupResult "WinGet download" "OK" $latestTag
+} catch {
+    Write-Host "  -> [ERROR] Failed to download $msixName`: $($_.Exception.Message)" -ForegroundColor Red
+    Add-SetupResult "WinGet download" "FAIL" $_.Exception.Message
+}
 
 # USE THE GLOBALLY DETECTED ARCHITECTURE
 Write-Host "`nUsing detected architecture: $systemArch" -ForegroundColor Gray
@@ -713,12 +763,16 @@ $depsFolder    = Join-Path $topDepsFolder $systemArch
 
 if ($depsZipUrl) {
     $depsZipPath = Join-Path $downloadPath $depsZipName
-    Invoke-WebRequest -Uri $depsZipUrl -OutFile $depsZipPath
-    # REMOVE EXISTING DEPENDENCIES FOLDER AND EXPAND THE ZIP
-    if (Test-Path $topDepsFolder) { Remove-Item -Path $topDepsFolder -Recurse -Force }
-    Expand-Archive -LiteralPath $depsZipPath -DestinationPath $topDepsFolder -Force
-    Write-Host "  -> Downloaded dependencies successfully." -ForegroundColor Green
-} 
+    try {
+        Invoke-WebRequest -Uri $depsZipUrl -OutFile $depsZipPath -UseBasicParsing
+        # REMOVE EXISTING DEPENDENCIES FOLDER AND EXPAND THE ZIP
+        if (Test-Path $topDepsFolder) { Remove-Item -Path $topDepsFolder -Recurse -Force }
+        Expand-Archive -LiteralPath $depsZipPath -DestinationPath $topDepsFolder -Force
+        Write-Host "  -> Downloaded dependencies successfully." -ForegroundColor Green
+    } catch {
+        Write-Host "  -> [ERROR] Failed to download dependencies: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
 else { 
     Write-Host "  -> No $depsZipName found in $latestTag, skipping dependency download." -ForegroundColor Yellow
 }
@@ -733,22 +787,50 @@ if (Test-Path $depsFolder) {
 
 # INSTALL THE WINGET MSIX BUNDLE
 Write-Host "`nInstalling WinGet..." -ForegroundColor Cyan
-Add-AppxPackage -Path $msixPath
-Write-Host "  -> WinGet installed successfully." -ForegroundColor Green
+$wingetInstalled = $false
+try {
+    Add-AppxPackage -Path $msixPath -ErrorAction Stop
+    Write-Host "  -> WinGet installed successfully." -ForegroundColor Green
+    $wingetInstalled = $true
+    Add-SetupResult "WinGet install" "OK"
+} catch {
+    Write-Host "  -> [ERROR] Failed to install WinGet: $($_.Exception.Message)" -ForegroundColor Red
+    Add-SetupResult "WinGet install" "FAIL" $_.Exception.Message
+}
 
-# REMOVE MSSTORE SOURCE IF SET TO DO SO
-Write-Host "`nConfiguring WinGet sources..." -ForegroundColor Cyan
-if ($removeMsStoreAsSource) {
-    try {
-        winget source remove -n msstore --ignore-warnings
-        Write-Host "  -> Removed 'msstore' source from winget." -ForegroundColor Green
-    } catch {
-        Write-Host "  -> [WARNING] An error occurred while trying to remove msstore source: $($_.Exception.Message)" -ForegroundColor Yellow
+# CONFIGURE WINGET SOURCES
+if ($wingetInstalled) {
+    # REFRESH PATH SO THE NEWLY INSTALLED WINGET IS DISCOVERABLE IN THIS SESSION
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Host "`n  -> [WARNING] WinGet was installed but is not yet available in PATH. Source configuration skipped." -ForegroundColor Yellow
+        Add-SetupResult "WinGet sources" "WARN" "WinGet not available in PATH"
+    } else {
+        Write-Host "`nConfiguring WinGet sources..." -ForegroundColor Cyan
+        if ($removeMsStoreAsSource) {
+            winget source remove -n msstore --ignore-warnings 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  -> Removed 'msstore' source from winget." -ForegroundColor Green
+                Add-SetupResult "WinGet sources" "OK" "Removed msstore source"
+            } else {
+                Write-Host "  -> [WARNING] Could not remove msstore source (exit code: $LASTEXITCODE)." -ForegroundColor Yellow
+                Add-SetupResult "WinGet sources" "WARN" "Could not remove msstore source (exit code: $LASTEXITCODE)"
+            }
+        } else {
+            # ACCEPT SOURCE AGREEMENTS AND UPDATE SOURCES
+            # NOTE: 'source update' is used instead of 'list' to avoid slow full-catalog download + package enumeration on first run
+            Write-Host "  -> Updating sources (this may take a moment on first run)..." -ForegroundColor Gray
+            winget source update --accept-source-agreements 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  -> Source agreements accepted and sources updated." -ForegroundColor Green
+                Add-SetupResult "WinGet sources" "OK"
+            } else {
+                Write-Host "  -> [WARNING] Could not update sources (exit code: $LASTEXITCODE)." -ForegroundColor Yellow
+                Add-SetupResult "WinGet sources" "WARN" "Exit code: $LASTEXITCODE"
+            }
+        }
     }
-} else {
-    # AUTOMATICALLY ACCEPT SOURCE AGREEMENTS TO AVOID PROMPTS - MOSTLY APPLIES TO MSSTORE
-    winget list --accept-source-agreements | Out-Null
-    Write-Host "  -> Accepted source agreements." -ForegroundColor Green
 }
 
 Write-Host "`nWinGet installation completed successfully!" -ForegroundColor Blue
@@ -770,10 +852,34 @@ try {
     Start-Sleep -Milliseconds 500
     Start-Process explorer
     Write-Host "  -> Explorer restarted successfully." -ForegroundColor Green
+    Add-SetupResult "Explorer restart" "OK"
 } catch {
     Write-Host "  -> [WARNING] Could not restart Explorer. $($_.Exception.Message)" -ForegroundColor Yellow
+    Add-SetupResult "Explorer restart" "WARN" $_.Exception.Message
 }
 
 Write-Host "`n`n============================================================" -ForegroundColor Blue
-Write-Host "Setup Complete!" -ForegroundColor Blue
-Write-Host "============================================================`n`n" -ForegroundColor Blue
+Write-Host "Setup Summary" -ForegroundColor Blue
+Write-Host "============================================================`n" -ForegroundColor Blue
+
+$okCount = @($script:setupResults | Where-Object { $_.Status -eq "OK" }).Count
+$warnCount = @($script:setupResults | Where-Object { $_.Status -eq "WARN" }).Count
+$failCount = @($script:setupResults | Where-Object { $_.Status -eq "FAIL" }).Count
+
+foreach ($result in $script:setupResults) {
+    $icon = switch ($result.Status) { "OK" { "[OK]  " } "WARN" { "[WARN]" } "FAIL" { "[FAIL]" } }
+    $color = switch ($result.Status) { "OK" { "Green" } "WARN" { "Yellow" } "FAIL" { "Red" } }
+    $line = "  $icon  $($result.Step)"
+    if ($result.Message) { $line += " - $($result.Message)" }
+    Write-Host $line -ForegroundColor $color
+}
+
+Write-Host ""
+$summaryParts = @()
+if ($okCount -gt 0) { $summaryParts += "$okCount succeeded" }
+if ($warnCount -gt 0) { $summaryParts += "$warnCount warnings" }
+if ($failCount -gt 0) { $summaryParts += "$failCount failed" }
+$summaryColor = if ($failCount -gt 0) { "Red" } elseif ($warnCount -gt 0) { "Yellow" } else { "Green" }
+Write-Host "  Result: $($summaryParts -join ', ')" -ForegroundColor $summaryColor
+
+Write-Host "`n============================================================`n`n" -ForegroundColor Blue
